@@ -36,13 +36,7 @@ root-dir := $(dir $(mkfile_path))
 
 support_verilator_4 := $(shell ($(verilator) --version | grep '4\.') > /dev/null 2>&1 ; echo $$?)
 ifeq ($(support_verilator_4), 0)
-	ifndef verilator_threads
-		ifeq ($(shell test `nproc` -ge 4; echo $$?),0)
-			verilator_threads := 4
-		else ifeq ($(shell test `nproc` -ge 2; echo $$?),0)
 			verilator_threads := 2
-		endif
-	endif
 endif
 
 ifndef RISCV
@@ -79,15 +73,22 @@ endif
 
 # Sources
 # Package files -> compile first
-ariane_pkg := core/include/riscv_pkg.sv                              \
+ifeq ($(findstring 32, $(variant)),32)
+    ariane_pkg := core/include/cv32a6_imac_sv0_config_pkg.sv
+else
+    ariane_pkg := core/include/cv64a6_imacfd_sv39_config_pkg.sv
+endif
+ariane_pkg += core/include/riscv_pkg.sv                              \
               corev_apu/riscv-dbg/src/dm_pkg.sv                      \
               core/include/ariane_pkg.sv                             \
+              core/include/ariane_rvfi_pkg.sv                        \
               core/include/std_cache_pkg.sv                          \
               core/include/wt_cache_pkg.sv                           \
               corev_apu/axi/src/axi_pkg.sv                           \
               corev_apu/register_interface/src/reg_intf.sv           \
               corev_apu/register_interface/src/reg_intf_pkg.sv       \
               core/include/axi_intf.sv                               \
+              corev_apu/tb/rvfi_pkg.sv                               \
               corev_apu/tb/ariane_soc_pkg.sv                         \
               corev_apu/tb/ariane_axi_soc_pkg.sv                     \
               core/include/ariane_axi_pkg.sv                         \
@@ -96,12 +97,12 @@ ariane_pkg := core/include/riscv_pkg.sv                              \
 ariane_pkg := $(addprefix $(root-dir), $(ariane_pkg))
 
 # utility modules
-util := include/instr_tracer_pkg.sv                         \
-        src/util/instr_tracer_if.sv                         \
-        src/util/instr_tracer.sv                            \
-        src/tech_cells_generic/src/cluster_clock_gating.sv  \
-        tb/common/mock_uart.sv                              \
-        src/util/sram.sv
+util := core/include/instr_tracer_pkg.sv                              \
+        common/local/util/instr_tracer_if.sv                          \
+        common/local/util/instr_tracer.sv                             \
+        corev_apu/src/tech_cells_generic/src/cluster_clock_gating.sv  \
+        corev_apu/tb/common/mock_uart.sv                              \
+        common/local/util/sram.sv
 
 ifdef spike-tandem
     util += tb/common/spike.sv
@@ -113,7 +114,7 @@ test_pkg := $(wildcard tb/test/*/*sequence_pkg.sv*) \
 			$(wildcard tb/test/*/*_pkg.sv*)
 
 # DPI
-dpi := $(patsubst tb/dpi/%.cc, ${dpi-library}/%.o, $(wildcard tb/dpi/*.cc))
+dpi := $(patsubst corev_apu/tb/dpi/%.cc, ${dpi-library}/%.o, $(wildcard corev_apu/tb/dpi/*.cc))
 
 # filter spike stuff if tandem is not activated
 ifndef spike-tandem
@@ -125,9 +126,10 @@ ifndef DROMAJO
     dpi := $(filter-out ${dpi-library}/dromajo_cosim_dpi.o, $(dpi))
 endif
 
-dpi_hdr := $(wildcard tb/dpi/*.h)
+dpi_hdr := $(wildcard corev_apu/tb/dpi/*.h)
 dpi_hdr := $(addprefix $(root-dir), $(dpi_hdr))
 CFLAGS := -I$(QUESTASIM_HOME)/include         \
+          -I$(VCS_HOME)/include \
           -I$(RISCV)/include                  \
           -I$(SPIKE_ROOT)/include             \
           $(if $(DROMAJO), -I../corev_apu/tb/dromajo/src,) \
@@ -142,6 +144,7 @@ endif
 ifdef spike-tandem
     CFLAGS += -Itb/riscv-isa-sim/install/include/spike
 endif
+
 
 # this list contains the standalone components
 src :=  $(filter-out core/ariane_regfile.sv, $(wildcard core/*.sv))                  \
@@ -217,20 +220,21 @@ src :=  $(filter-out core/ariane_regfile.sv, $(wildcard core/*.sv))             
         corev_apu/src/tech_cells_generic/src/pulp_clock_mux2.sv                      \
         corev_apu/tb/ariane_testharness.sv                                           \
         corev_apu/tb/ariane_peripherals.sv                                           \
+        corev_apu/tb/rvfi_tracer.sv                                                      \
         corev_apu/tb/common/uart.sv                                                  \
         corev_apu/tb/common/SimDTM.sv                                                \
         corev_apu/tb/common/SimJTAG.sv
 
 src := $(addprefix $(root-dir), $(src))
 
-uart_src := $(wildcard fpga/src/apb_uart/src/*.vhd)
+uart_src := $(wildcard corev_apu/fpga/src/apb_uart/src/*.vhd)
 uart_src := $(addprefix $(root-dir), $(uart_src))
 
-fpga_src :=  $(wildcard fpga/src/*.sv) $(wildcard fpga/src/bootrom/*.sv) $(wildcard fpga/src/ariane-ethernet/*.sv)
+fpga_src :=  $(wildcard corev_apu/fpga/src/*.sv) $(wildcard corev_apu/fpga/src/bootrom/*.sv) $(wildcard corev_apu/fpga/src/ariane-ethernet/*.sv)
 fpga_src := $(addprefix $(root-dir), $(fpga_src))
 
 # look for testbenches
-tbs := tb/ariane_tb.sv tb/ariane_testharness.sv
+tbs := corev_apu/tb/ariane_tb.sv corev_apu/tb/ariane_testharness.sv
 # RISCV asm tests and benchmark setup (used for CI)
 # there is a definesd test-list with selected CI tests
 riscv-test-dir            := tmp/riscv-tests/build/isa/
@@ -290,6 +294,18 @@ else
 	questa-cmd += +jtag_rbb_enable=0
 endif
 
+vcs_build: $(dpi-library)/ariane_dpi.so
+	vlogan -full64 -nc -sverilog -ntb_opts uvm-1.2
+	vlogan -full64 -nc -sverilog -ntb_opts uvm-1.2 +define+WT_CACHE +define+RVFI_TRACE $(filter %.sv,$(ariane_pkg)) +incdir+core/include/+$(VCS_HOME)/etc/uvm-1.2/dpi
+	vlogan -full64 -nc -sverilog -ntb_opts uvm-1.2 +define+WT_CACHE +define+RVFI_TRACE $(filter %.sv,$(util)) +incdir+common/local/util+core/include/+src/util/+$(VCS_HOME)/etc/uvm-1.2/dpi
+	vhdlan -full64 $(filter %.vhd,$(uart_src))
+	vlogan -full64 -nc -sverilog -ntb_opts uvm-1.2 -assert svaext +define+WT_CACHE +define+RVFI_TRACE $(filter %.sv,$(src)) +incdir+core/include/+common/submodules/common_cells/include/+common/local/util/+$(VCS_HOME)/etc/uvm-1.2/dpi
+	vlogan -full64 -nc -sverilog -ntb_opts uvm-1.2 $(tbs) +define+RVFI_TRACE
+	vcs -full64 -timescale=1ns/1ns -ntb_opts uvm-1.2 work.ariane_tb
+
+vcs: vcs_build
+	./simv +permissive -sv_lib work-dpi/ariane_dpi +permissive-off ++$(elf-bin) | tee vcs.log
+
 # Build the TB and module using QuestaSim
 build: $(library) $(library)/.build-srcs $(library)/.build-tb $(dpi-library)/ariane_dpi.so
 	# Optimize top level
@@ -299,24 +315,24 @@ build: $(library) $(library)/.build-srcs $(library)/.build-tb $(dpi-library)/ari
 $(library)/.build-srcs: $(util) $(library)
 	vlog$(questa_version) $(compile_flag) -work $(library) $(filter %.sv,$(ariane_pkg)) $(list_incdir) -suppress 2583
 	# vcom$(questa_version) $(compile_flag_vhd) -work $(library) -pedanticerrors $(filter %.vhd,$(ariane_pkg))
-	vlog$(questa_version) $(compile_flag) -work $(library) $(filter %.sv,$(util)) $(list_incdir) -suppress 2583
+	vlog$(questa_version) $(compile_flag) -timescale "1ns / 1ns" -work $(library) $(filter %.sv,$(util)) $(list_incdir) -suppress 2583
 	# Suppress message that always_latch may not be checked thoroughly by QuestaSim.
 	vcom$(questa_version) $(compile_flag_vhd) -work $(library) -pedanticerrors $(filter %.vhd,$(uart_src))
 	# vcom$(questa_version) $(compile_flag_vhd) -work $(library) -pedanticerrors $(filter %.vhd,$(src))
-	vlog$(questa_version) $(compile_flag) -work $(library) -pedanticerrors $(filter %.sv,$(src)) $(list_incdir) -suppress 2583
+	vlog$(questa_version) $(compile_flag) -timescale "1ns / 1ns" -work $(library) -pedanticerrors $(filter %.sv,$(src)) $(list_incdir) -suppress 2583
 	touch $(library)/.build-srcs
 
 # build TBs
 $(library)/.build-tb: $(dpi)
 	# Compile top level
-	vlog$(questa_version) $(compile_flag) -sv $(tbs) -work $(library)
+	vlog$(questa_version) $(compile_flag) -timescale "1ns / 1ns" -sv $(tbs) -work $(library)
 	touch $(library)/.build-tb
 
 $(library):
 	vlib${questa_version} $(library)
 
 # compile DPIs
-$(dpi-library)/%.o: tb/dpi/%.cc $(dpi_hdr)
+$(dpi-library)/%.o: corev_apu/tb/dpi/%.cc $(dpi_hdr)
 	mkdir -p $(dpi-library)
 	$(CXX) -shared -fPIC -std=c++0x -Bsymbolic $(CFLAGS) -c $< -o $@
 
@@ -328,12 +344,7 @@ $(dpi-library)/ariane_dpi.so: $(dpi)
 # single test runs on Questa can be started by calling make <testname>, e.g. make towers.riscv
 # the test names are defined in ci/riscv-asm-tests.list, and in ci/riscv-benchmarks.list
 # if you want to run in batch mode, use make <testname> batch-mode=1
-# alternatively you can call make sim elf-bin=<path/to/elf-bin> in order to load an arbitrary binary		
- 
-generate-trace-vsim:
-	make sim preload=$(preload) elf-bin= batch-mode=1
-	make generate-trace
-
+# alternatively you can call make sim elf-bin=<path/to/elf-bin> in order to load an arbitrary binary
 sim: build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +MAX_CYCLES=$(max_cycles) +UVM_TESTNAME=$(test_case) \
 	+BASEDIR=$(riscv-test-dir) $(uvm-flags) $(QUESTASIM_FLAGS) -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi  \
@@ -409,7 +420,7 @@ CVA6_HOME	   ?= $(realpath -s $(root-dir))
 XRUN_INCDIR :=+incdir+$(CVA6_HOME)/src/axi_node 	\
 	+incdir+$(CVA6_HOME)/src/common_cells/include 	\
 	+incdir+$(CVA6_HOME)/src/util
-XRUN_TB := $(addprefix $(CVA6_HOME)/, tb/ariane_tb.sv)
+XRUN_TB := $(addprefix $(CVA6_HOME)/, corev_apu/tb/ariane_tb.sv)
 
 XRUN_COMP_FLAGS  ?= -64bit -disable_sem2009 -access +rwc 			\
 		    -sv -v93 -uvm -uvmhome $(XRUN_UVMHOME_ARG) 			\
@@ -541,7 +552,7 @@ xrun-ci: xrun-asm-tests xrun-amo-tests xrun-mul-tests xrun-fp-tests xrun-benchma
 verilate_command := $(verilator)                                                                                 \
                     $(filter-out %.vhd, $(ariane_pkg))                                                           \
                     $(filter-out core/fpu_wrap.sv, $(filter-out %.vhd, $(src)))                                  \
-                    +define+$(defines)                                                                           \
+                    +define+$(defines) -DRVFI_TRACE=1                                                            \
                     common/local/util/sram.sv                                                                    \
                     corev_apu/tb/common/mock_uart.sv                                                             \
                     +incdir+corev_apu/axi_node                                                                   \
@@ -557,6 +568,7 @@ verilate_command := $(verilator)                                                
                     -Wno-UNOPTFLAT                                                                               \
                     -Wno-BLKANDNBLK                                                                              \
                     -Wno-style                                                                                   \
+                    $(if ($(PRELOAD)!=""), -DPRELOAD=1,)                                                         \
                     $(if $(DROMAJO), -DDROMAJO=1,)                                                               \
                     $(if $(PROFILE),--stats --stats-vars --profile-cfuncs,)                                      \
                     $(if $(DEBUG),--trace --trace-structs,)                                                      \
@@ -714,22 +726,22 @@ check-torture:
 	grep 'All signatures match for $(test-location)' $(riscv-torture-dir)/$(test-location).log
 	diff -s $(riscv-torture-dir)/$(test-location).spike.sig $(riscv-torture-dir)/$(test-location).rtlsim.sig
 
-fpga_filter := $(addprefix $(root-dir), bootrom/bootrom.sv)
-fpga_filter += $(addprefix $(root-dir), include/instr_tracer_pkg.sv)
+fpga_filter := $(addprefix $(root-dir), corev_apu/bootrom/bootrom.sv)
+fpga_filter += $(addprefix $(root-dir), core/include/instr_tracer_pkg.sv)
 fpga_filter += $(addprefix $(root-dir), src/util/ex_trace_item.sv)
 fpga_filter += $(addprefix $(root-dir), src/util/instr_trace_item.sv)
-fpga_filter += $(addprefix $(root-dir), src/util/instr_tracer_if.sv)
-fpga_filter += $(addprefix $(root-dir), src/util/instr_tracer.sv)
+fpga_filter += $(addprefix $(root-dir), common/local/util/instr_tracer_if.sv)
+fpga_filter += $(addprefix $(root-dir), common/local/util/instr_tracer.sv)
 
 fpga: $(ariane_pkg) $(util) $(src) $(fpga_src) $(uart_src)
 	@echo "[FPGA] Generate sources"
-	@echo read_vhdl        {$(uart_src)}    > fpga/scripts/add_sources.tcl
-	@echo read_verilog -sv {$(ariane_pkg)} >> fpga/scripts/add_sources.tcl
-	@echo read_verilog -sv {$(filter-out $(fpga_filter), $(util))}     >> fpga/scripts/add_sources.tcl
-	@echo read_verilog -sv {$(filter-out $(fpga_filter), $(src))} 	   >> fpga/scripts/add_sources.tcl
-	@echo read_verilog -sv {$(fpga_src)}   >> fpga/scripts/add_sources.tcl
+	@echo read_vhdl        {$(uart_src)}    > corev_apu/fpga/scripts/add_sources.tcl
+	@echo read_verilog -sv {$(ariane_pkg)} >> corev_apu/fpga/scripts/add_sources.tcl
+	@echo read_verilog -sv {$(filter-out $(fpga_filter), $(util))}     >> corev_apu/fpga/scripts/add_sources.tcl
+	@echo read_verilog -sv {$(filter-out $(fpga_filter), $(src))} 	   >> corev_apu/fpga/scripts/add_sources.tcl
+	@echo read_verilog -sv {$(fpga_src)}   >> corev_apu/fpga/scripts/add_sources.tcl
 	@echo "[FPGA] Generate Bitstream"
-	cd fpga && make BOARD=$(BOARD) XILINX_PART=$(XILINX_PART) XILINX_BOARD=$(XILINX_BOARD) CLK_PERIOD_NS=$(CLK_PERIOD_NS)
+	cd corev_apu/fpga && make BOARD=$(BOARD) XILINX_PART=$(XILINX_PART) XILINX_BOARD=$(XILINX_BOARD) CLK_PERIOD_NS=$(CLK_PERIOD_NS)
 
 .PHONY: fpga
 
